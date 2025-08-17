@@ -16,10 +16,12 @@ import google.generativeai as genai
 import pandas as pd
 import schedule
 import random
-import string
+from mailgun.client import Client as MailgunClient
+from twilio.rest import Client as TwilioClient
+import telegram
 
 # Configuração inicial
-load_dotenv()  # Carrega as variáveis do arquivo .env
+load_dotenv()
 
 # Configuração de logging
 logging.basicConfig(
@@ -46,10 +48,9 @@ CONFIG = {
     'max_leads_per_run': 50,
     'min_time_between_messages': 30,  # em segundos
     'max_messages_per_day': 100,
-    'test_mode': False,  # Se True, não envia mensagens reais
     'affiliate_links': {
-        'produto1': 'https://hotmart.com/affiliate-link-1',
-        'produto2': 'https://monetizze.com.br/affiliate-link-2',
+        'produto1': os.getenv('AFFILIATE_LINK_1'),
+        'produto2': os.getenv('AFFILIATE_LINK_2'),
     },
     'message_templates': {
         'email': """
@@ -83,7 +84,6 @@ def init_database():
     conn = sqlite3.connect(CONFIG['database_file'])
     cursor = conn.cursor()
     
-    # Tabela de leads
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS leads (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,7 +99,6 @@ def init_database():
     )
     ''')
     
-    # Tabela de mensagens enviadas
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS mensagens (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,7 +111,6 @@ def init_database():
     )
     ''')
     
-    # Tabela de conversões
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS conversoes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -136,24 +134,20 @@ class LeadCollector:
         
     def _setup_selenium(self):
         options = Options()
-        options.add_argument("--headless")  # Execução sem interface gráfica
+        options.add_argument("--headless")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         
-        if CONFIG['test_mode']:
-            options.add_argument("--window-size=1920,1080")  # Para testes visuais
-            
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
         return driver
     
     def collect_from_website(self, url: str, selectors: Dict):
-        """Coleta leads de um website específico usando seletores CSS"""
         logger.info(f"Coletando leads do website: {url}")
         
         try:
             self.driver.get(url)
-            time.sleep(3)  # Espera a página carregar
+            time.sleep(3)
             
             leads = []
             elements = self.driver.find_elements(By.CSS_SELECTOR, selectors['container'])
@@ -183,7 +177,6 @@ class LeadCollector:
             return []
     
     def collect_from_api(self, api_url: str, params: Dict):
-        """Coleta leads de uma API pública"""
         logger.info(f"Coletando leads da API: {api_url}")
         
         try:
@@ -208,13 +201,10 @@ class LeadCollector:
             return []
     
     def _detect_interests(self, nome: str, email: str) -> str:
-        """Usa o Gemini para detectar interesses com base no nome e email"""
         try:
             prompt = f"""
             Com base no nome '{nome}' e email '{email}', sugira possíveis interesses 
             para marketing de afiliados. Retorne apenas palavras-chave separadas por vírgula.
-            
-            Exemplo: marketing digital, empreendedorismo, investimentos
             """
             
             response = gemini_model.generate_content(prompt)
@@ -224,11 +214,9 @@ class LeadCollector:
             return "geral"
     
     def save_leads(self, leads: List[Dict]):
-        """Salva os leads no banco de dados"""
         cursor = self.db_conn.cursor()
         
         for lead in leads:
-            # Verifica se o lead já existe
             cursor.execute(
                 "SELECT id FROM leads WHERE email = ? OR telefone = ?",
                 (lead['email'], lead['telefone'])
@@ -255,7 +243,6 @@ class LeadCollector:
         self.db_conn.commit()
     
     def close(self):
-        """Fecha as conexões e recursos"""
         self.driver.quit()
         self.db_conn.close()
 
@@ -263,20 +250,14 @@ class LeadCollector:
 class MessageGenerator:
     @staticmethod
     def generate_persuasive_message(lead: Dict, produto: str, canal: str) -> str:
-        """Gera uma mensagem persuasiva personalizada para o lead"""
         try:
-            # Seleciona o template baseado no canal
             template = CONFIG['message_templates'].get(canal, '')
-            
-            # Gera benefícios personalizados com Gemini
             beneficios = MessageGenerator._generate_benefits(lead['interesses'], produto)
             
-            # Seleciona um link de afiliado aleatório para o produto
             link_afiliado = CONFIG['affiliate_links'].get(produto, '')
             if isinstance(link_afiliado, list):
                 link_afiliado = random.choice(link_afiliado)
             
-            # Preenche o template
             message = template.format(
                 nome=lead['nome'].split()[0] if lead['nome'] else 'cliente',
                 produto=produto,
@@ -292,13 +273,10 @@ class MessageGenerator:
     
     @staticmethod
     def _generate_benefits(interesses: str, produto: str) -> str:
-        """Usa o Gemini para gerar benefícios personalizados"""
         try:
             prompt = f"""
             Gere 3 benefícios convincentes do produto '{produto}' para alguém interessado em: {interesses}.
             Retorne uma única frase persuasiva com os benefícios.
-            
-            Exemplo: "aumentar suas vendas online, economizar tempo e escalar seu negócio"
             """
             
             response = gemini_model.generate_content(prompt)
@@ -313,13 +291,20 @@ class MessageSender:
         self.db_conn = init_database()
         self.sent_today = 0
         
-        # Configurações de APIs (simuladas - você precisará configurar as reais no .env)
-        self.email_api_key = os.getenv('EMAIL_API_KEY')
-        self.whatsapp_api_key = os.getenv('WHATSAPP_API_KEY')
-        self.telegram_api_key = os.getenv('TELEGRAM_API_KEY')
+        # Configurações de APIs reais
+        self.mailgun_client = MailgunClient(
+            api_key=os.getenv('MAILGUN_API_KEY'),
+            domain=os.getenv('MAILGUN_DOMAIN')
+        )
+        
+        self.twilio_client = TwilioClient(
+            os.getenv('TWILIO_ACCOUNT_SID'),
+            os.getenv('TWILIO_AUTH_TOKEN')
+        )
+        
+        self.telegram_bot = telegram.Bot(token=os.getenv('TELEGRAM_BOT_TOKEN'))
     
     def send_messages(self):
-        """Envia mensagens para leads qualificados"""
         if self.sent_today >= CONFIG['max_messages_per_day']:
             logger.info("Limite diário de mensagens atingido.")
             return
@@ -335,30 +320,22 @@ class MessageSender:
             if not produto:
                 continue
             
-            # Seleciona canal de envio
             canal = self._select_channel_for_lead(lead)
-            
-            # Gera mensagem personalizada
             mensagem = MessageGenerator.generate_persuasive_message(lead, produto, canal)
             
             if not mensagem:
                 continue
             
-            # Envia a mensagem (simulado em test_mode)
             status = "enviado" if self._send_message(lead, canal, mensagem) else "falha"
-            
-            # Registra no banco de dados
             self._record_message(lead['id'], canal, mensagem, status)
             
             if status == "enviado":
                 self.sent_today += 1
                 self._update_lead_status(lead['id'])
             
-            # Intervalo entre mensagens para evitar bloqueios
             time.sleep(CONFIG['min_time_between_messages'])
     
     def _get_qualified_leads(self) -> List[Dict]:
-        """Retorna leads qualificados para receber mensagens"""
         cursor = self.db_conn.cursor()
         
         cursor.execute('''
@@ -375,10 +352,8 @@ class MessageSender:
         return leads
     
     def _select_product_for_lead(self, lead: Dict) -> Optional[str]:
-        """Seleciona o produto mais adequado para o lead"""
         interesses = lead['interesses'].lower() if lead['interesses'] else ''
         
-        # Lógica simples de mapeamento de interesses para produtos
         if 'marketing' in interesses or 'vendas' in interesses:
             return 'produto1'
         elif 'investimento' in interesses or 'dinheiro' in interesses:
@@ -389,7 +364,6 @@ class MessageSender:
         return None
     
     def _select_channel_for_lead(self, lead: Dict) -> str:
-        """Seleciona o canal de comunicação mais adequado"""
         if lead['telefone']:
             return random.choice(['whatsapp', 'telegram'])
         elif lead['email']:
@@ -397,11 +371,6 @@ class MessageSender:
         return 'email'
     
     def _send_message(self, lead: Dict, canal: str, mensagem: str) -> bool:
-        """Envia a mensagem pelo canal apropriado (simulado em test_mode)"""
-        if CONFIG['test_mode']:
-            logger.info(f"[TESTE] Mensagem para {lead['email'] or lead['telefone']} via {canal}: {mensagem[:50]}...")
-            return True
-        
         try:
             if canal == 'email':
                 return self._send_email(lead['email'], mensagem)
@@ -415,25 +384,141 @@ class MessageSender:
             return False
     
     def _send_email(self, email: str, mensagem: str) -> bool:
-        """Envia email (implementação simulada - substitua pela sua API real)"""
-        logger.info(f"Enviando email para {email}")
-        # Substitua por sua implementação real usando Mailgun, Gmail API, etc.
-        return True
+        try:
+            response = self.mailgun_client.send_email(
+                from_email="contato@seudominio.com",
+                to_email=email,
+                subject="Oportunidade exclusiva para você",
+                text=mensagem
+            )
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"Erro ao enviar email para {email}: {str(e)}")
+            return False
     
     def _send_whatsapp(self, telefone: str, mensagem: str) -> bool:
-        """Envia mensagem WhatsApp (implementação simulada - substitua pela sua API real)"""
-        logger.info(f"Enviando WhatsApp para {telefone}")
-        # Substitua por sua implementação real usando Twilio, WhatsApp Business API, etc.
-        return True
+        try:
+            message = self.twilio_client.messages.create(
+                body=mensagem,
+                from_=f"whatsapp:{os.getenv('TWILIO_WHATSAPP_NUMBER')}",
+                to=f"whatsapp:{telefone}"
+            )
+            return message.sid is not None
+        except Exception as e:
+            logger.error(f"Erro ao enviar WhatsApp para {telefone}: {str(e)}")
+            return False
     
     def _send_telegram(self, telefone: str, mensagem: str) -> bool:
-        """Envia mensagem Telegram (implementação simulada - substitua pela sua API real)"""
-        logger.info(f"Enviando Telegram para {telefone}")
-        # Substitua por sua implementação real usando Telegram Bot API
-        return True
+        try:
+            # Primeiro, formatamos o número de telefone para o padrão internacional
+            telefone_formatado = self._formatar_telefone_telegram(telefone)
+            if not telefone_formatado:
+                logger.error(f"Número de telefone inválido para Telegram: {telefone}")
+                return False
+
+            # Verificamos se já temos o chat_id desse número no banco de dados
+            chat_id = self._get_telegram_chat_id(telefone_formatado)
+            
+            if chat_id:
+                # Se já temos o chat_id, enviamos a mensagem diretamente
+                self.telegram_bot.send_message(chat_id=chat_id, text=mensagem)
+                return True
+            else:
+                # Se não temos o chat_id, precisamos iniciar uma conversa
+                return self._iniciar_conversa_telegram(telefone_formatado, mensagem)
+                
+        except Exception as e:
+            logger.error(f"Erro ao enviar Telegram para {telefone}: {str(e)}")
+            return False
+
+    def _formatar_telefone_telegram(self, telefone: str) -> Optional[str]:
+        """Formata o número de telefone para o padrão internacional (+5511999999999)"""
+        try:
+            # Remove todos os caracteres não numéricos
+            numeros = ''.join(filter(str.isdigit, telefone))
+            
+            # Verifica se o número tem um código de país
+            if not numeros.startswith('55') and len(numeros) == 11:  # Assume Brasil se não tiver código
+                numeros = '55' + numeros
+                
+            # Adiciona o '+' no início
+            return f"+{numeros}"
+        except Exception as e:
+            logger.error(f"Erro ao formatar telefone {telefone}: {str(e)}")
+            return None
+
+    def _iniciar_conversa_telegram(self, telefone: str, mensagem: str) -> bool:
+        """Inicia uma nova conversa no Telegram via deep link"""
+        try:
+            # Cria um deep link do Telegram
+            deep_link = f"https://t.me/{os.getenv('TELEGRAM_BOT_USERNAME')}?start=contato_{telefone[1:]}"
+            
+            # Primeiro envia uma mensagem via WhatsApp ou SMS com o link de convite
+            mensagem_convite = (
+                f"Olá! Temos uma mensagem importante para você no Telegram. "
+                f"Clique neste link para iniciar a conversa: {deep_link}"
+            )
+            
+            # Tenta enviar via WhatsApp primeiro
+            if self._send_whatsapp(telefone, mensagem_convite):
+                logger.info(f"Convite Telegram enviado via WhatsApp para {telefone}")
+                return True
+            else:
+                # Se falhar, tenta enviar via SMS
+                if self._send_sms(telefone, mensagem_convite):
+                    logger.info(f"Convite Telegram enviado via SMS para {telefone}")
+                    return True
+            
+            logger.error(f"Não foi possível enviar convite do Telegram para {telefone}")
+            return False
+        except Exception as e:
+            logger.error(f"Erro ao iniciar conversa no Telegram: {str(e)}")
+            return False
+
+    def _send_sms(self, telefone: str, mensagem: str) -> bool:
+        """Envia SMS usando a API da Twilio"""
+        try:
+            message = self.twilio_client.messages.create(
+                body=mensagem,
+                from_=os.getenv('TWILIO_PHONE_NUMBER'),
+                to=telefone
+            )
+            return message.sid is not None
+        except Exception as e:
+            logger.error(f"Erro ao enviar SMS para {telefone}: {str(e)}")
+            return False
+
+    def _get_telegram_chat_id(self, telefone: str) -> Optional[int]:
+        """Obtém o chat_id do Telegram para um número de telefone"""
+        try:
+            # Verifica no banco de dados primeiro
+            cursor = self.db_conn.cursor()
+            cursor.execute("SELECT telegram_chat_id FROM leads WHERE telefone = ?", (telefone,))
+            result = cursor.fetchone()
+            
+            if result and result[0]:
+                return int(result[0])
+                
+            # Se não encontrou no banco, tenta verificar via API do bot
+            updates = self.telegram_bot.get_updates()
+            for update in updates:
+                if update.message and update.message.contact:
+                    if update.message.contact.phone_number == telefone:
+                        chat_id = update.message.chat.id
+                        # Salva no banco de dados para uso futuro
+                        cursor.execute(
+                            "UPDATE leads SET telegram_chat_id = ? WHERE telefone = ?",
+                            (str(chat_id), telefone)
+                        )
+                        self.db_conn.commit()
+                        return chat_id
+            
+            return None
+        except Exception as e:
+            logger.error(f"Erro ao obter chat_id do Telegram: {str(e)}")
+            return None
     
     def _record_message(self, lead_id: int, canal: str, mensagem: str, status: str):
-        """Registra a mensagem enviada no banco de dados"""
         cursor = self.db_conn.cursor()
         
         cursor.execute(
@@ -459,7 +544,6 @@ class MessageSender:
         self.db_conn.commit()
     
     def _update_lead_status(self, lead_id: int):
-        """Atualiza o status do lead"""
         cursor = self.db_conn.cursor()
         cursor.execute(
             "UPDATE leads SET status = 'contatado', ultimo_contato = ? WHERE id = ?",
@@ -471,52 +555,130 @@ class MessageSender:
 class ConversionMonitor:
     def __init__(self):
         self.db_conn = init_database()
-        self.affiliate_apis = {
-            'hotmart': os.getenv('HOTMART_API_KEY'),
-            'monetizze': os.getenv('MONETIZZE_API_KEY'),
-            'eduzz': os.getenv('EDUZZ_API_KEY')
-        }
     
     def check_conversions(self):
-        """Verifica conversões nas plataformas de afiliados"""
         logger.info("Verificando conversões nas plataformas de afiliados")
         
-        # Simulação - na prática você faria chamadas às APIs reais
-        conversions = self._simulate_api_calls()
+        # Hotmart
+        hotmart_conversions = self._check_hotmart_conversions()
+        for conv in hotmart_conversions:
+            self._record_conversion(conv)
         
-        for conv in conversions:
+        # Monetizze
+        monetizze_conversions = self._check_monetizze_conversions()
+        for conv in monetizze_conversions:
+            self._record_conversion(conv)
+        
+        # Eduzz
+        eduzz_conversions = self._check_eduzz_conversions()
+        for conv in eduzz_conversions:
             self._record_conversion(conv)
     
-    def _simulate_api_calls(self) -> List[Dict]:
-        """Simula chamadas às APIs de afiliados (substitua pelas reais)"""
-        # Em produção, você faria chamadas reais às APIs de afiliados
-        # como Hotmart, Monetizze, Eduzz, etc.
-        
-        # Esta é uma simulação que retorna 0-2 conversões aleatórias
-        num_conversions = random.randint(0, 2)
-        conversions = []
-        
-        for _ in range(num_conversions):
-            lead_id = self._get_random_contacted_lead()
-            if lead_id:
-                conversions.append({
-                    'lead_id': lead_id,
-                    'produto': random.choice(list(CONFIG['affiliate_links'].keys())),
-                    'valor': random.uniform(100, 1000),
-                    'comissao': random.uniform(30, 300)
-                })
-        
-        return conversions
+    def _check_hotmart_conversions(self) -> List[Dict]:
+        try:
+            url = "https://api-hotmart-com-br.affiliates.afilias.com.br/v1/affiliates/sales"
+            headers = {
+                "Authorization": f"Bearer {os.getenv('HOTMART_API_KEY')}",
+                "Content-Type": "application/json"
+            }
+            params = {
+                "start_date": (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'),
+                "end_date": datetime.now().strftime('%Y-%m-%d')
+            }
+            
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            conversions = []
+            for sale in data.get('sales', []):
+                lead_id = self._find_lead_by_email(sale['buyer']['email'])
+                if lead_id:
+                    conversions.append({
+                        'lead_id': lead_id,
+                        'produto': sale['product']['name'],
+                        'valor': float(sale['price']['value']),
+                        'comissao': float(sale['commission']['value'])
+                    })
+            
+            return conversions
+        except Exception as e:
+            logger.error(f"Erro ao verificar conversões na Hotmart: {str(e)}")
+            return []
     
-    def _get_random_contacted_lead(self) -> Optional[int]:
-        """Retorna um ID de lead aleatório que foi contatado"""
+    def _check_monetizze_conversions(self) -> List[Dict]:
+        try:
+            url = "https://api.monetizze.com.br/2.1/transactions"
+            headers = {
+                "Authorization": f"Token {os.getenv('MONETIZZE_API_KEY')}",
+                "Content-Type": "application/json"
+            }
+            params = {
+                "start_date": (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'),
+                "end_date": datetime.now().strftime('%Y-%m-%d'),
+                "status": "approved"
+            }
+            
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            conversions = []
+            for transaction in data.get('transactions', []):
+                lead_id = self._find_lead_by_email(transaction['customer']['email'])
+                if lead_id:
+                    conversions.append({
+                        'lead_id': lead_id,
+                        'produto': transaction['product']['name'],
+                        'valor': float(transaction['price']),
+                        'comissao': float(transaction['commission_value'])
+                    })
+            
+            return conversions
+        except Exception as e:
+            logger.error(f"Erro ao verificar conversões na Monetizze: {str(e)}")
+            return []
+    
+    def _check_eduzz_conversions(self) -> List[Dict]:
+        try:
+            url = "https://api.eduzz.com/sale"
+            headers = {
+                "Authorization": f"Bearer {os.getenv('EDUZZ_API_KEY')}",
+                "Content-Type": "application/json"
+            }
+            params = {
+                "start_date": (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'),
+                "end_date": datetime.now().strftime('%Y-%m-%d'),
+                "status": "complete"
+            }
+            
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            conversions = []
+            for sale in data.get('data', []):
+                lead_id = self._find_lead_by_email(sale['customer']['email'])
+                if lead_id:
+                    conversions.append({
+                        'lead_id': lead_id,
+                        'produto': sale['product']['name'],
+                        'valor': float(sale['amount']),
+                        'comissao': float(sale['commission'])
+                    })
+            
+            return conversions
+        except Exception as e:
+            logger.error(f"Erro ao verificar conversões na Eduzz: {str(e)}")
+            return []
+    
+    def _find_lead_by_email(self, email: str) -> Optional[int]:
         cursor = self.db_conn.cursor()
-        cursor.execute("SELECT id FROM leads WHERE status = 'contatado' ORDER BY RANDOM() LIMIT 1")
+        cursor.execute("SELECT id FROM leads WHERE email = ?", (email,))
         result = cursor.fetchone()
         return result[0] if result else None
     
     def _record_conversion(self, conversion: Dict):
-        """Registra uma conversão no banco de dados"""
         cursor = self.db_conn.cursor()
         
         cursor.execute(
@@ -540,8 +702,7 @@ class ConversionMonitor:
         
         self.db_conn.commit()
         logger.info(f"Conversão registrada para o lead {conversion['lead_id']} - Comissão: R${conversion['comissao']:.2f}")
-
-# Classe para geração de relatórios
+        
 class ReportGenerator:
     def __init__(self):
         self.db_conn = init_database()
@@ -689,15 +850,13 @@ class ReportGenerator:
         print(report['suggestions'])
         print("="*40 + "\n")
 
-# Classe principal do sistema
+
 class AutonomousSalesAgent:
     def __init__(self):
         self.lead_collector = LeadCollector()
         self.message_sender = MessageSender()
         self.conversion_monitor = ConversionMonitor()
-        self.report_generator = ReportGenerator()
-        
-        # Configura tarefas agendadas
+        self.report_generator = ReportGenerator()  # Agora corretamente inicializado
         self._setup_scheduler()
     
     def _setup_scheduler(self):
@@ -707,13 +866,6 @@ class AutonomousSalesAgent:
         schedule.every().day.at("14:00").do(self.send_messages)
         schedule.every().day.at("17:00").do(self.check_conversions)
         schedule.every().day.at("18:00").do(self.generate_report)
-        
-        # Para testes, executa mais frequentemente
-        if CONFIG['test_mode']:
-            schedule.every(10).minutes.do(self.collect_leads)
-            schedule.every(15).minutes.do(self.send_messages)
-            schedule.every(20).minutes.do(self.check_conversions)
-            schedule.every(30).minutes.do(self.generate_report)
     
     def collect_leads(self):
         """Coleta leads de várias fontes"""
@@ -757,7 +909,7 @@ class AutonomousSalesAgent:
     def generate_report(self):
         """Gera relatório de performance"""
         logger.info("Gerando relatório diário")
-        self.report_generator.generate_daily_report()
+        self.report_generator.generate_daily_report()  # Agora chamando o método correto
         logger.info("Relatório gerado")
     
     def run(self):
@@ -772,7 +924,6 @@ class AutonomousSalesAgent:
             logger.info("Encerrando o agente de vendas")
             self.lead_collector.close()
 
-# Ponto de entrada do sistema
 if __name__ == "__main__":
     agent = AutonomousSalesAgent()
     agent.run()
