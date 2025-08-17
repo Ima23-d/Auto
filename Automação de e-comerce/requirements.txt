@@ -7,3 +7,7 @@ pandas==2.0.3
 schedule==1.2.0
 beautifulsoup4==4.12.2
 sqlalchemy==2.0.20
+mailgun-client==1.2.0
+twilio==8.3.0
+python-telegram-bot==20.3
+mailgun-sdk==1.0.0
