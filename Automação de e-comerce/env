@@ -1,7 +1,27 @@
 GEMINI_API_KEY=AIzaSyBNCAPnaDMMVTNpBEMAH3Hn91O5zNlOCoQ
-EMAIL_API_KEY=sua_chave_de_email_api
-WHATSAPP_API_KEY=sua_chave_whatsapp_api
-TELEGRAM_API_KEY=sua_chave_telegram_api
+# Configurações do Gemini
+
+# Configurações de email (Mailgun)
+MAILGUN_API_KEY=sua_chave_mailgun
+MAILGUN_DOMAIN=seudominio.com
+
+
+# Configurações do WhatsApp (Twilio)
+TWILIO_ACCOUNT_SID=sua_conta_twilio
+TWILIO_AUTH_TOKEN=seu_token_twilio
+TWILIO_WHATSAPP_NUMBER=+14155238886  # Número do Sandbox ou seu número Twilio
+
+# Configurações do Telegram
+TELEGRAM_BOT_TOKEN=seu_token_do_bot
+
+# Configurações de afiliados
 HOTMART_API_KEY=sua_chave_hotmart
 MONETIZZE_API_KEY=sua_chave_monetizze
 EDUZZ_API_KEY=sua_chave_eduzz
+
+# Links de afiliados
+AFFILIATE_LINK_1=https://hotmart.com/seu-link-afiliado1
+AFFILIATE_LINK_2=https://monetizze.com.br/seu-link-afiliado2
+TELEGRAM_BOT_TOKEN=seu_token_aqui
+TELEGRAM_BOT_USERNAME=nome_do_seu_bot_sem_@
+TWILIO_PHONE_NUMBER=+15551234567  # Seu número Twilio para SMS
